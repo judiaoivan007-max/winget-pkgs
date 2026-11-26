@@ -1,0 +1,69 @@
+name: Verify Pro-Fisco 0.4.14 installer
+on:
+  push:
+    branches:
+      - codex/pro-fisco-installer-smoke-489591
+    paths:
+      - .github/workflows/verify-profisco.yml
+permissions: {}
+jobs:
+  windows-silent-install:
+    runs-on: windows-2025
+    timeout-minutes: 7
+    steps:
+      - name: Install and uninstall the exact release in a fresh Windows profile
+        shell: pwsh
+        env:
+          PF_INSTALLER_URL: https://winget-0-4-14.alwayson-profisco-downloads.pages.dev/Pro-Fisco-Piloto-Setup-0.4.14-x64.exe
+          PF_INSTALLER_SHA256: 3D301C17129303FEFE206C75EF5614D8303A6B779418560AD761FD38F7BC66F9
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+          $pfSetup = Join-Path $env:RUNNER_TEMP 'Pro-Fisco-Piloto-Setup-0.4.14-x64.exe'
+          $pfInstallDir = Join-Path $env:LOCALAPPDATA 'Programs\Pro-Fisco Piloto'
+          $pfUninstallKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Pro-Fisco Piloto'
+          $pfStartMenu = Join-Path ([Environment]::GetFolderPath('Programs')) 'Pró-Fisco\Pró-Fisco Piloto.lnk'
+          $pfDesktop = Join-Path ([Environment]::GetFolderPath('DesktopDirectory')) 'Pró-Fisco Piloto.lnk'
+          $pfStartup = Join-Path ([Environment]::GetFolderPath('Startup')) 'Pró-Fisco Piloto.lnk'
+
+          function Invoke-SilentSetup([string]$FilePath, [string]$Action) {
+            $pfProcess = Start-Process -FilePath $FilePath -ArgumentList '/S' -PassThru
+            if (-not $pfProcess.WaitForExit(90000)) {
+              Get-CimInstance Win32_Process -Filter "ProcessId=$($pfProcess.Id) or ParentProcessId=$($pfProcess.Id)" |
+                Select-Object Name,ProcessId,ParentProcessId | Format-Table -AutoSize
+              throw "$Action timed out after 90 seconds"
+            }
+            Write-Host "$Action exit code $($pfProcess.ExitCode)"
+            if ($pfProcess.ExitCode -ne 0) { throw "$Action failed" }
+          }
+
+          if ((Test-Path -LiteralPath $pfInstallDir) -or (Test-Path -LiteralPath $pfUninstallKey)) { throw 'The test profile is not clean' }
+          Invoke-WebRequest -Uri $env:PF_INSTALLER_URL -OutFile $pfSetup -UserAgent 'Windows Package Manager/v1.29.380' -TimeoutSec 45
+          if ((Get-FileHash -LiteralPath $pfSetup -Algorithm SHA256).Hash -ne $env:PF_INSTALLER_SHA256) { throw 'Downloaded installer hash mismatch' }
+          Write-Host "Verified the release SHA-256 on Windows $([Environment]::OSVersion.Version)"
+          Invoke-SilentSetup -FilePath $pfSetup -Action 'Silent install'
+
+          $pfRegistration = Get-ItemProperty -LiteralPath $pfUninstallKey
+          if (($pfRegistration.DisplayVersion -ne '0.4.14') -or ($pfRegistration.InstallLocation -ne $pfInstallDir)) {
+            throw "Unexpected Windows uninstall registration ($($pfRegistration.DisplayVersion), $($pfRegistration.InstallLocation))"
+          }
+          $pfLauncher = Join-Path $pfInstallDir 'Pro-Fisco.exe'
+          $pfUninstaller = Join-Path $pfInstallDir 'Desinstalar.exe'
+          foreach ($pfFile in @($pfLauncher, $pfUninstaller, $pfStartMenu, $pfDesktop, $pfStartup)) {
+            if (-not (Test-Path -LiteralPath $pfFile -PathType Leaf)) { throw "Setup did not create $pfFile" }
+          }
+          $pfSettings = Get-Content -Raw -LiteralPath (Join-Path $pfInstallDir 'app/pilot-update.json') | ConvertFrom-Json
+          if ($pfSettings.version -ne '0.4.14') { throw 'Installed app version mismatch' }
+          $pfRetained = Join-Path $pfInstallDir 'Pro-Fisco-Setup.exe'
+          if ((Get-FileHash -LiteralPath $pfRetained -Algorithm SHA256).Hash -ne $env:PF_INSTALLER_SHA256) { throw 'Retained installer hash mismatch' }
+          Write-Host "Verified Windows registration, app files, shortcuts, and installer copy for $($pfRegistration.DisplayName) $($pfRegistration.DisplayVersion)"
+
+          Invoke-SilentSetup -FilePath $pfUninstaller -Action 'Silent uninstall'
+          $pfCleanupDeadline = [DateTime]::UtcNow.AddSeconds(30)
+          while ((Test-Path -LiteralPath $pfUninstallKey) -and [DateTime]::UtcNow -lt $pfCleanupDeadline) {
+            Start-Sleep -Milliseconds 300
+          }
+          foreach ($pfPath in @($pfUninstallKey, $pfLauncher, $pfUninstaller, $pfRetained, $pfStartMenu, $pfDesktop, $pfStartup)) {
+            if (Test-Path -LiteralPath $pfPath) { throw "Uninstall left $pfPath" }
+          }
+          Write-Host 'Full silent install and uninstall passed'
