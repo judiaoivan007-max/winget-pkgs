@@ -12,7 +12,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Install 0.4.14 from the submitted WinGet manifest
-        shell: powershell
+        shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $ProgressPreference = 'SilentlyContinue'
@@ -26,15 +26,18 @@ jobs:
             }
           }
           $pfWinGet = Find-WinGet
-          if (-not $pfWinGet) {
+          $pfVersion = if ($pfWinGet) { (& $pfWinGet --version | Select-Object -Last 1).Trim() }
+          if ($pfVersion -ne 'v1.29.380') {
+            Write-Host "Preparing WinGet v1.29.380 on the test runner (previous version $pfVersion)"
             Install-Module -Name Microsoft.WinGet.Client -RequiredVersion 1.29.380 -Repository PSGallery -Scope CurrentUser -Force
             Import-Module Microsoft.WinGet.Client -RequiredVersion 1.29.380
-            Repair-WinGetPackageManager -AllUsers
+            Repair-WinGetPackageManager -Version '1.29.380' -AllUsers
             $pfWinGet = Find-WinGet
           }
           if (-not $pfWinGet) { throw 'WinGet could not be located on the clean runner' }
-          & $pfWinGet --version
-          if ($LASTEXITCODE -ne 0) { throw 'WinGet did not start' }
+          $pfVersion = (& $pfWinGet --version | Select-Object -Last 1).Trim()
+          if ($LASTEXITCODE -ne 0 -or $pfVersion -ne 'v1.29.380') { throw "Expected WinGet v1.29.380, got $pfVersion" }
+          Write-Host "Running WinGet $pfVersion"
 
           $manifest = Join-Path $env:RUNNER_TEMP 'AlwaysOn.ProFisco-0.4.14'
           New-Item -ItemType Directory -Path $manifest | Out-Null
