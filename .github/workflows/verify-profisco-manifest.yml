@@ -48,12 +48,31 @@ jobs:
 
           $registered = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Pro-Fisco Piloto'
           if (Test-Path -LiteralPath $registered) { throw 'Expected an empty install profile' }
+          $pfUrl = 'https://downloads.alwayson.dpdns.org/Pro-Fisco-Piloto-Setup-0.4.14-x64.exe'
+          $pfProbe = Join-Path $env:RUNNER_TEMP 'pro-fisco-network-probe.exe'
+          curl.exe --fail --silent --show-error --connect-timeout 10 --max-time 30 --user-agent 'Windows Package Manager/v1.11.510' $pfUrl --output $pfProbe
+          if ($LASTEXITCODE -ne 0) { throw 'The production URL download failed from the Windows VM' }
+          if ((Get-FileHash -LiteralPath $pfProbe -Algorithm SHA256).Hash -ne '3D301C17129303FEFE206C75EF5614D8303A6B779418560AD761FD38F7BC66F9') {
+            throw 'Production installer digest differed from the submitted manifest'
+          }
+          Write-Host 'Production URL delivered the expected installer to the Windows VM'
+
           $log = Join-Path $env:RUNNER_TEMP 'winget-profisco-0.4.14.log'
-          & $pfWinGet install --manifest $manifest --silent --scope user --disable-interactivity --log $log
-          if ($LASTEXITCODE -ne 0) {
-            $result = $LASTEXITCODE
-            if (Test-Path -LiteralPath $log) { Get-Content -LiteralPath $log -Tail 40 }
-            throw "WinGet manifest install failed with exit code $result"
+          $out = Join-Path $env:RUNNER_TEMP 'profisco-cli-stdout.txt'
+          $err = Join-Path $env:RUNNER_TEMP 'profisco-cli-stderr.txt'
+          $arguments = @('install', '--manifest', ('"{0}"' -f $manifest), '--silent', '--scope', 'user', '--disable-interactivity',
+            '--verbose-logs', '--log', ('"{0}"' -f $log))
+          $running = Start-Process -FilePath $pfWinGet -ArgumentList $arguments -RedirectStandardOutput $out -RedirectStandardError $err -PassThru
+          $exited = $running.WaitForExit(75000)
+          if (-not $exited) { $running.Kill($true); $running.WaitForExit() }
+          Get-Content -LiteralPath $out,$err | Where-Object { $_ -match '[a-zA-Z]{3}' } | Select-Object -Last 35
+          $diagnostics = Join-Path $pfState 'DiagOutputDir'
+          $lastLog = Get-ChildItem -LiteralPath $diagnostics -File -Filter 'WinGet*.log' -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if ($lastLog) { Get-Content -LiteralPath $lastLog.FullName -Tail 38 }
+          if (-not $exited) { throw 'WinGet had not returned in 75 seconds' }
+          if ($running.ExitCode -ne 0) {
+            throw "WinGet manifest install failed with exit code $($running.ExitCode)"
           }
           $app = Get-ItemProperty -LiteralPath $registered
           if ($app.DisplayVersion -ne '0.4.14') { throw "Wrong installed version $($app.DisplayVersion)" }
