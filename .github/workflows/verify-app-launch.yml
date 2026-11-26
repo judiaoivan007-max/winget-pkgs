@@ -1,0 +1,87 @@
+name: Verify the released Pro-Fisco app launches
+on:
+  push:
+    branches:
+      - codex/pro-fisco-installer-smoke-489591
+    paths:
+      - .github/workflows/verify-app-launch.yml
+permissions: {}
+jobs:
+  pro-fisco-first-launch:
+    runs-on: windows-2025
+    timeout-minutes: 5
+    steps:
+      - name: Open the shipped owner setup from the Start menu
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+          $pfSetup = Join-Path $env:RUNNER_TEMP 'Pro-Fisco-Piloto-Setup-0.4.14-x64.exe'
+          $pfUrl = 'https://downloads.alwayson.dpdns.org/Pro-Fisco-Piloto-Setup-0.4.14-x64.exe'
+          $pfInstall = Join-Path $env:LOCALAPPDATA 'Programs\Pro-Fisco Piloto'
+          if (Test-Path -LiteralPath $pfInstall) { throw 'Expected a fresh Windows installation' }
+
+          Invoke-WebRequest -Uri $pfUrl -UserAgent 'Windows Package Manager/v1.29.380' -OutFile $pfSetup -TimeoutSec 30
+          if ((Get-FileHash -LiteralPath $pfSetup -Algorithm SHA256).Hash -ne '3D301C17129303FEFE206C75EF5614D8303A6B779418560AD761FD38F7BC66F9') {
+            throw 'Wrong installer bytes'
+          }
+          $pfInstaller = Start-Process -FilePath $pfSetup -ArgumentList '/S' -PassThru
+          if (-not $pfInstaller.WaitForExit(45000) -or $pfInstaller.ExitCode -ne 0) { throw 'Setup did not complete successfully' }
+
+          $pfShortcut = Join-Path ([Environment]::GetFolderPath('Programs')) 'Pró-Fisco\Pró-Fisco Piloto.lnk'
+          if (-not (Test-Path -LiteralPath $pfShortcut -PathType Leaf)) { throw 'Installed Start menu shortcut is missing' }
+          Start-Process -FilePath $pfShortcut
+          $pfLauncherPath = Join-Path $pfInstall 'Pro-Fisco.exe'
+          $pfNodePath = Join-Path $pfInstall 'app\node.exe'
+          $pfPort = $null
+          $pfDeadline = [DateTime]::UtcNow.AddSeconds(35)
+          do {
+            $pfLauncher = Get-CimInstance Win32_Process -Filter "Name='Pro-Fisco.exe'" |
+              Where-Object { $_.ExecutablePath -eq $pfLauncherPath } | Select-Object -First 1
+            if ($pfLauncher) {
+              $pfNode = Get-CimInstance Win32_Process -Filter "ParentProcessId=$($pfLauncher.ProcessId)" |
+                Where-Object { $_.ExecutablePath -eq $pfNodePath } | Select-Object -First 1
+              if ($pfNode) {
+                $pfPort = Get-NetTCPConnection -OwningProcess $pfNode.ProcessId -State Listen -ErrorAction SilentlyContinue |
+                  Where-Object LocalAddress -eq '127.0.0.1' | Select-Object -First 1 -ExpandProperty LocalPort
+              }
+            }
+            if (-not $pfPort) { Start-Sleep -Milliseconds 350 }
+          } while (-not $pfPort -and [DateTime]::UtcNow -lt $pfDeadline)
+          if (-not $pfPort) {
+            if ($pfLauncher) { Get-Process -Id $pfLauncher.ProcessId | Select-Object Id,MainWindowTitle }
+            throw 'The Start menu shortcut did not start the bundled Pró-Fisco server'
+          }
+
+          $pfSetupState = Invoke-RestMethod -Uri "http://127.0.0.1:$pfPort/api/auth/setup" -TimeoutSec 8
+          if ($pfSetupState.available -ne $true) { throw 'Owner setup is unavailable on a fresh install' }
+          $pfDatabase = Join-Path $env:LOCALAPPDATA 'Pro-Fisco\Piloto\pro-fisco.sqlite'
+          if (-not (Test-Path -LiteralPath $pfDatabase -PathType Leaf)) { throw 'Local app database was not initialized' }
+          Write-Host 'Installed Start menu shortcut started the bundled server and initialized the owner setup'
+
+          $pfBrowserBinary = @(
+            (Join-Path $env:ProgramFiles 'Google\Chrome\Application\chrome.exe'),
+            (Join-Path ([Environment]::GetFolderPath('ProgramFilesX86')) 'Microsoft\Edge\Application\msedge.exe')
+          ) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+          if (-not $pfBrowserBinary) { throw 'No supported Chromium browser found on the runner' }
+          $pfBrowserProfile = Join-Path $env:RUNNER_TEMP 'pro-fisco-boot-browser'
+          $pfDom = Join-Path $env:RUNNER_TEMP 'pro-fisco-owner-setup.html'
+          $pfBrowserErrors = Join-Path $env:RUNNER_TEMP 'pro-fisco-browser.err'
+          $pfPortal = "http://127.0.0.1:$pfPort/polido/welcome"
+          $pfBrowserStart = @{
+            FilePath = $pfBrowserBinary
+            ArgumentList = @('--headless=new', '--no-first-run', '--dump-dom', '--virtual-time-budget=9000',
+              ('--user-data-dir="{0}"' -f $pfBrowserProfile), $pfPortal)
+            RedirectStandardOutput = $pfDom
+            RedirectStandardError = $pfBrowserErrors
+            PassThru = $true
+          }
+          $pfBrowserRun = Start-Process @pfBrowserStart
+          if (-not $pfBrowserRun.WaitForExit(30000)) {
+            $pfBrowserRun.Kill($true)
+            throw 'Headless browser did not return the portal DOM'
+          }
+          if ($pfBrowserRun.ExitCode -ne 0) { throw 'Headless browser failed to load the installed app' }
+          $pfHtml = Get-Content -LiteralPath $pfDom -Raw -Encoding utf8
+          if ($pfHtml -notmatch 'Criar conta local') { throw 'The portal did not render the owner setup form' }
+          Write-Host 'Verified that the 0.4.14 first launch renders Criar conta local in the browser'
