@@ -40,6 +40,12 @@ jobs:
           }
           & $pfWinGet settings --enable LocalManifestFiles
           if ($LASTEXITCODE -ne 0) { throw 'Could not enable manifest testing on the disposable runner' }
+
+          $pfState = Join-Path $env:LOCALAPPDATA 'Packages/Microsoft.DesktopAppInstaller_8wekyb3d8bbwe/LocalState'
+          New-Item -ItemType Directory -Path $pfState -Force | Out-Null
+          '{"network":{"downloader":"wininet"}}' | Set-Content -LiteralPath (Join-Path $pfState 'settings.json') -Encoding utf8NoBOM
+          Write-Host 'Using WinGet WinINet networking on the disposable runner'
+
           $registered = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Pro-Fisco Piloto'
           if (Test-Path -LiteralPath $registered) { throw 'Expected an empty install profile' }
           $log = Join-Path $env:RUNNER_TEMP 'winget-profisco-0.4.14.log'
