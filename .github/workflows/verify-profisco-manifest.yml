@@ -1,0 +1,65 @@
+name: Test submitted Pro-Fisco manifest
+on:
+  push:
+    branches:
+      - codex/pro-fisco-installer-smoke-489591
+    paths:
+      - .github/workflows/verify-profisco-manifest.yml
+permissions: {}
+jobs:
+  winget-install:
+    runs-on: windows-2025
+    timeout-minutes: 10
+    steps:
+      - name: Install 0.4.14 from the submitted WinGet manifest
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+          function Find-WinGet {
+            $command = Get-Command winget.exe -ErrorAction SilentlyContinue
+            if ($command) { return $command.Source }
+            $app = Get-AppxPackage Microsoft.DesktopAppInstaller | Sort-Object Version -Descending | Select-Object -First 1
+            if ($app) {
+              $binary = Join-Path $app.InstallLocation 'winget.exe'
+              if (Test-Path -LiteralPath $binary -PathType Leaf) { return $binary }
+            }
+          }
+          $pfWinGet = Find-WinGet
+          if (-not $pfWinGet) {
+            Install-Module -Name Microsoft.WinGet.Client -RequiredVersion 1.29.380 -Repository PSGallery -Scope CurrentUser -Force
+            Import-Module Microsoft.WinGet.Client -RequiredVersion 1.29.380
+            Repair-WinGetPackageManager -AllUsers
+            $pfWinGet = Find-WinGet
+          }
+          if (-not $pfWinGet) { throw 'WinGet could not be located on the clean runner' }
+          & $pfWinGet --version
+          if ($LASTEXITCODE -ne 0) { throw 'WinGet did not start' }
+
+          $manifest = Join-Path $env:RUNNER_TEMP 'AlwaysOn.ProFisco-0.4.14'
+          New-Item -ItemType Directory -Path $manifest | Out-Null
+          $source = 'https://raw.githubusercontent.com/judiaoivan007-max/winget-pkgs/34b891e330bb96955fc0c1b7d4e1ae6f58995eab/manifests/a/AlwaysOn/ProFisco/0.4.14'
+          foreach ($name in 'AlwaysOn.ProFisco.yaml','AlwaysOn.ProFisco.installer.yaml','AlwaysOn.ProFisco.locale.pt-MZ.yaml') {
+            curl.exe --fail --silent --show-error --max-time 30 "$source/$name" --output (Join-Path $manifest $name)
+            if ($LASTEXITCODE -ne 0) { throw "Could not retrieve submitted manifest file $name" }
+          }
+          & $pfWinGet settings --enable LocalManifestFiles
+          if ($LASTEXITCODE -ne 0) { throw 'Could not enable manifest testing on the disposable runner' }
+          & $pfWinGet validate --manifest $manifest --disable-interactivity
+          if ($LASTEXITCODE -ne 0) { throw 'WinGet rejected the submitted manifest' }
+
+          $registered = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Pro-Fisco Piloto'
+          if (Test-Path -LiteralPath $registered) { throw 'Expected an empty install profile' }
+          $log = Join-Path $env:RUNNER_TEMP 'winget-profisco-0.4.14.log'
+          & $pfWinGet install --manifest $manifest --silent --scope user --disable-interactivity --log $log
+          if ($LASTEXITCODE -ne 0) {
+            $result = $LASTEXITCODE
+            if (Test-Path -LiteralPath $log) { Get-Content -LiteralPath $log -Tail 40 }
+            throw "WinGet manifest install failed with exit code $result"
+          }
+          $app = Get-ItemProperty -LiteralPath $registered
+          if ($app.DisplayVersion -ne '0.4.14') { throw "Wrong installed version $($app.DisplayVersion)" }
+          if (-not (Test-Path -LiteralPath (Join-Path $app.InstallLocation 'Pro-Fisco.exe') -PathType Leaf)) {
+            throw 'Installed launcher missing'
+          }
+          Write-Host 'Verified successful WinGet manifest installation of Pro-Fisco 0.4.14'
