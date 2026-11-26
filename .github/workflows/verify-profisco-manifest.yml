@@ -63,14 +63,34 @@ jobs:
           $arguments = @('install', '--manifest', ('"{0}"' -f $manifest), '--silent', '--scope', 'user', '--disable-interactivity',
             '--verbose-logs', '--log', ('"{0}"' -f $log))
           $running = Start-Process -FilePath $pfWinGet -ArgumentList $arguments -RedirectStandardOutput $out -RedirectStandardError $err -PassThru
-          $exited = $running.WaitForExit(75000)
-          if (-not $exited) { $running.Kill($true); $running.WaitForExit() }
+          $exited = $running.WaitForExit(30000)
+          if (-not $exited) {
+            Write-Host 'Processes present while WinGet is waiting'
+            Get-CimInstance Win32_Process | Where-Object {
+              $_.ParentProcessId -eq $running.Id -or $_.ProcessId -eq $running.Id -or
+                $_.Name -match '^(smartscreen|consent|ProFisco-Check|Pro-Fisco[^.]*)\.exe$'
+            } | ForEach-Object {
+              $window = Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue
+              Write-Host "Process: $($_.Name) pid=$($_.ProcessId) parent=$($_.ParentProcessId) session=$($_.SessionId) window=$($window.MainWindowTitle)"
+            }
+            $pfCache = Join-Path $env:TEMP 'WinGet/AlwaysOn.ProFisco.0.4.14/Pro-Fisco-Piloto-Setup-0.4.14-x64.exe'
+            if (Test-Path -LiteralPath $pfCache) {
+              Get-Content -LiteralPath $pfCache -Stream Zone.Identifier -ErrorAction SilentlyContinue |
+                Where-Object { $_ -match '^ZoneId=' }
+            }
+            $running.Kill($true)
+            $running.WaitForExit()
+          }
           Get-Content -LiteralPath $out,$err | Where-Object { $_ -match '[a-zA-Z]{3}' } | Select-Object -Last 35
           $diagnostics = Join-Path $pfState 'DiagOutputDir'
           $lastLog = Get-ChildItem -LiteralPath $diagnostics -File -Filter 'WinGet*.log' -ErrorAction SilentlyContinue |
             Sort-Object LastWriteTime -Descending | Select-Object -First 1
-          if ($lastLog) { Get-Content -LiteralPath $lastLog.FullName -Tail 38 }
-          if (-not $exited) { throw 'WinGet had not returned in 75 seconds' }
+          if ($lastLog) {
+            Get-Content -LiteralPath $lastLog.FullName | Where-Object {
+              $_ -match 'installer args|Starting:|download completed|wininet|hash verified|motw|security|attachment|trusted|shellexecute'
+            } | Select-Object -Last 40
+          }
+          if (-not $exited) { throw 'WinGet was still waiting after 30 seconds' }
           if ($running.ExitCode -ne 0) {
             throw "WinGet manifest install failed with exit code $($running.ExitCode)"
           }
